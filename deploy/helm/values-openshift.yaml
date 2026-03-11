@@ -1,0 +1,86 @@
+# OpenShift-specific value overrides for VSS deployment.
+# See docs/deploy-openshift.md for details.
+
+global:
+  ngcImagePullSecretName: ngc-docker-reg-secret
+
+# anyuid SCC — these services require their hardcoded UIDs (Challenge 2)
+arango-db:
+  serviceAccount:
+    create: false
+    name: vss-sa
+
+neo4j:
+  serviceAccount:
+    create: false
+    name: vss-sa
+
+vss:
+  serviceAccount:
+    create: false
+    name: vss-sa
+
+# Security context removal — NIM/NeMo containers work under any UID (Challenge 3)
+nim-llm:
+  podSecurityContext:
+    runAsUser: null
+    runAsGroup: null
+    fsGroup: null
+
+nemo-embedding:
+  applicationSpecs:
+    embedding-deployment:
+      securityContext:
+        runAsUser: null
+        runAsGroup: null
+        fsGroup: null
+      containers:
+        embedding-container:
+          env:
+          - name: TOKENIZERS_PARALLELISM  # Prevents Rayon thread pool burst (Challenge 8)
+            value: "false"
+  extraPodVolumes:
+  - name: dshm  # Triton needs >64MB /dev/shm (Challenge 6)
+    emptyDir:
+      medium: Memory
+      sizeLimit: 2Gi
+  extraPodVolumeMounts:
+  - name: dshm
+    mountPath: /dev/shm
+
+nemo-rerank:
+  applicationSpecs:
+    ranking-deployment:
+      securityContext:
+        runAsUser: null
+        runAsGroup: null
+      containers:
+        ranking-container:
+          env:
+          - name: TOKENIZERS_PARALLELISM
+            value: "false"
+  extraPodVolumes:
+  - name: dshm
+    emptyDir:
+      medium: Memory
+      sizeLimit: 2Gi
+  extraPodVolumeMounts:
+  - name: dshm
+    mountPath: /dev/shm
+
+# Writable storage — OpenShift random UID can't own image dirs (Challenge 1)
+milvus-minio:
+  extraPodVolumes:
+  - name: data-volume
+    emptyDir: {}
+  extraPodVolumeMounts:
+  - name: data-volume
+    mountPath: /minio_data
+
+milvus:
+  extraPodVolumes:
+  - name: data-volume
+    emptyDir: {}
+  extraPodVolumeMounts:
+  - name: data-volume
+    mountPath: /var/lib/milvus
