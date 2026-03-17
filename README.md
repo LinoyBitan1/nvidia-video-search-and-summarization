@@ -139,9 +139,9 @@ The `/deploy/helm/` directory contains a `nvidia-blueprint-vss-2.4.1.tgz` file w
 
 Deploying VSS on OpenShift requires additional configuration to handle security context constraints, storage permissions, and GPU scheduling. A deployment script and OpenShift-specific Helm value overrides are provided.
 
-- [docs/deploy-openshift.md](docs/deploy-openshift.md): Full deployment guide with OpenShift-specific challenges and solutions.
-- [deploy/helm/deploy-openshift.sh](deploy/helm/deploy-openshift.sh): Automated deployment script (creates namespace, secrets, service account, and runs `helm upgrade --install`).
-- [deploy/helm/values-openshift.yaml](deploy/helm/values-openshift.yaml): Helm value overrides for OpenShift compatibility.
+- [openshift/README.md](openshift/README.md): Full deployment guide with OpenShift-specific challenges and solutions.
+- [openshift/deploy-openshift.sh](openshift/deploy-openshift.sh): Automated deployment script (creates namespace, secrets, service account, and runs `helm upgrade --install`).
+- [openshift/values-openshift.yaml](openshift/values-openshift.yaml): Helm value overrides for OpenShift compatibility.
 
 ## Known CVEs
 
