@@ -1,0 +1,150 @@
+# OpenShift-specific value overrides for VSS deployment.
+# Usage: helm upgrade --install vss <chart> -f values-openshift.yaml \
+#          --set openshift.secrets.ngcApiKey=$NGC_API_KEY \
+#          --set openshift.secrets.hfToken=$HF_TOKEN
+
+openshift:
+  enabled: true
+  # GPU tolerations — update keys to match your cluster's GPU node taints
+  # Find your keys: oc get nodes -l nvidia.com/gpu.present=true -o name | xargs -I{} oc describe {} | grep -A1 Taints
+  gpuTolerations: &gpu-tolerations
+    - key: nvidia.com/gpu
+      effect: NoSchedule
+      operator: Exists
+    # - key: <your-taint-key>
+    #   effect: NoSchedule
+    #   operator: Exists
+  serviceAccount:
+    create: true
+    name: vss-sa
+  route:
+    enabled: true
+    host: ""
+    tls:
+      termination: edge
+      insecureEdgeTerminationPolicy: Redirect
+  scc:
+    create: true
+  secrets:
+    create: true
+    ngcApiKey: ""      # set via --set openshift.secrets.ngcApiKey=$NGC_API_KEY
+    hfToken: ""        # set via --set openshift.secrets.hfToken=$HF_TOKEN
+    # Default credentials — change for production
+    arango:
+      username: root
+      password: password
+    minio:
+      accessKey: minioadmin
+      secretKey: minioadmin
+    graphDb:
+      username: neo4j
+      password: password
+
+global:
+  ngcImagePullSecretName: ngc-docker-reg-secret
+  # ucfGlobalEnv appends env vars to all pods
+  ucfGlobalEnv:
+  - name: LLM_MODEL
+    value: meta/llama-3.1-8b-instruct        # chart default: meta/llama-3.1-70b-instruct
+  - name: DISABLE_GUARDRAILS
+    value: "true"                              # chart default: false, for 8B LLM to skip guardrails
+
+# anyuid SCC — these services require their hardcoded UIDs (Challenge 2)
+arango-db:
+  serviceAccount:
+    create: false
+    name: vss-sa
+
+neo4j:
+  serviceAccount:
+    create: false
+    name: vss-sa
+
+vss:
+  serviceAccount:
+    create: false
+    name: vss-sa
+  tolerations: *gpu-tolerations
+  # GPU count — 1 for Llama 8B
+  resources:
+    limits:
+      nvidia.com/gpu: 1
+
+
+# LLM model configuration
+nim-llm:
+  # GPU count — 1 for Llama 8B, 4 for Llama 70B
+  resources:
+    limits:
+      nvidia.com/gpu: 1
+  tolerations: *gpu-tolerations
+  model:
+    name: meta/llama-3.1-8b-instruct
+  image:
+    repository: nvcr.io/nim/meta/llama-3.1-8b-instruct
+    tag: latest
+  # Security context removal — NIM/NeMo containers work under any UID (Challenge 3)
+  podSecurityContext:
+    runAsUser: null
+    runAsGroup: null
+    fsGroup: null
+
+nemo-embedding:
+  tolerations: *gpu-tolerations
+  applicationSpecs:
+    embedding-deployment:
+      securityContext:
+        runAsUser: null
+        runAsGroup: null
+        fsGroup: null
+      containers:
+        embedding-container:
+          env:
+          - name: TOKENIZERS_PARALLELISM  # Prevents Rayon thread pool burst (Challenge 8)
+            value: "false"
+  extraPodVolumes:
+  - name: dshm  # Triton needs >64MB /dev/shm (Challenge 6)
+    emptyDir:
+      medium: Memory
+      sizeLimit: 2Gi
+  extraPodVolumeMounts:
+  - name: dshm
+    mountPath: /dev/shm
+
+nemo-rerank:
+  tolerations: *gpu-tolerations
+  applicationSpecs:
+    ranking-deployment:
+      securityContext:
+        runAsUser: null
+        runAsGroup: null
+      containers:
+        ranking-container:
+          env:
+          - name: TOKENIZERS_PARALLELISM
+            value: "false"
+  extraPodVolumes:
+  - name: dshm
+    emptyDir:
+      medium: Memory
+      sizeLimit: 2Gi
+  extraPodVolumeMounts:
+  - name: dshm
+    mountPath: /dev/shm
+
+# Writable storage — OpenShift random UID can't own image dirs (Challenge 1)
+milvus-minio:
+  extraPodVolumes:
+  - name: data-volume
+    emptyDir: {}
+  extraPodVolumeMounts:
+  - name: data-volume
+    mountPath: /minio_data
+
+milvus:
+  extraPodVolumes:
+  - name: data-volume
+    emptyDir: {}
+  extraPodVolumeMounts:
+  - name: data-volume
+    mountPath: /var/lib/milvus
