@@ -40,7 +40,7 @@ The Helm chart deploys 11 pods. Four require GPUs (`vss`, `nim-llm`, `nemo-embed
 
 1. We introduced an `openshift.enabled` flag in the pre-existing [`values.yaml`](nvidia-blueprint-vss-2.4.1.tgz) file. This is the only non-additive change we made on top of the NVIDIA upstream codebase.
 2. All the values and resources required for the OpenShift deployment are placed in two dedicated files: [`values-openshift.yaml`](values-openshift.yaml) and [`templates/openshift.yaml`](nvidia-blueprint-vss-2.4.1.tgz) (inside the chart).
-3. Secrets, ServiceAccount, SCC RoleBinding, and Route are created by the Helm chart template (`templates/openshift.yaml`), gated by the `openshift.enabled` flag. API keys are passed via `--set` at install time; all other secrets use default values defined in `values-openshift.yaml`.
+3. NGC and HuggingFace secrets are created via NVIDIA's built-in `nvcf` mechanism (`templates/nvcf_secrets.yaml`), configured in `values-openshift.yaml`. Service credential secrets (ArangoDB, MinIO, Neo4j) are created by `templates/openshift.yaml` when `openshift.secrets.create` is `true`, or can be created manually before install. ServiceAccount, SCC RoleBinding, and Route are also created by `templates/openshift.yaml`, gated by the `openshift.enabled` flag.
 4. The deployment requires only two files and a single Helm command — no external scripts or separate OpenShift directory. See the [Deployment](#deployment) section below.
 
 ---
@@ -95,8 +95,9 @@ All configuration is defined in [`values-openshift.yaml`](values-openshift.yaml)
 
 | Parameter | Description |
 |-----------|-------------|
-| `openshift.secrets.ngcApiKey` | NGC API key for image pulls and NIM authentication |
-| `openshift.secrets.hfToken` | HuggingFace token for the gated Cosmos-Reason2-8B model |
+| `nvcf.dockerRegSecrets[0].password` | NGC API key for container image pulls |
+| `nvcf.additionalSecrets[0].stringData.value` | NGC API key for NIM runtime authentication |
+| `nvcf.additionalSecrets[1].stringData.value` | HuggingFace token for the gated Cosmos-Reason2-8B model |
 
 ### Configurable in `values-openshift.yaml`
 
@@ -132,6 +133,8 @@ oc new-project vss
 
 ### 2. Configure secrets
 
+All secrets can be created either by the Helm chart or manually before install.
+
 Export your API keys:
 
 ```bash
@@ -139,19 +142,15 @@ export NGC_API_KEY="<your NGC key>"
 export HF_TOKEN="<your HuggingFace token>"
 ```
 
-**Option A: Let Helm create secrets (for development)**
+**Option A: Let Helm create all secrets (default)**
 
-The chart creates all secrets automatically. Set your API keys in `values-openshift.yaml` or pass them via `--set`:
+NGC and HuggingFace secrets are created via NVIDIA's built-in `nvcf` mechanism (`templates/nvcf_secrets.yaml`), pre-configured in `values-openshift.yaml` — just pass API keys via `--set` at install time. Service credential secrets (ArangoDB, MinIO, Neo4j) are created by `templates/openshift.yaml` when `openshift.secrets.create: true` (the default). No extra steps needed.
 
-```yaml
-openshift:
-  secrets:
-    create: true
-    ngcApiKey: "your-ngc-api-key"
-    hfToken: "your-hf-token"
-```
+> **Key rotation:** `nvcf` secrets use `helm.sh/hook: pre-install` and won't update on `helm upgrade`. To rotate keys, delete the secret first (`oc delete secret <name> -n vss`) then re-run `helm upgrade`.
 
-**Option B: Create secrets manually (recommended for production)**
+**Option B: Create all secrets manually (recommended for production)**
+
+Clear `nvcf.dockerRegSecrets` and `nvcf.additionalSecrets` (set to `[]`) and set `openshift.secrets.create=false` in your values, then create all secrets manually:
 
 > **Important:** Secret names are hardcoded in the chart's sub-charts. They must match exactly as shown below — regardless of the Helm release name.
 
@@ -192,8 +191,6 @@ oc create secret generic graph-db-creds-secret \
   -n vss
 ```
 
-Then set `openshift.secrets.create=false` in your values.
-
 ### 3. Configure deployment
 
 Export the LLM model. All other configuration (GPU counts, tolerations, security contexts) is defined in [`values-openshift.yaml`](values-openshift.yaml).
@@ -217,8 +214,9 @@ export LLM_MODEL="meta/llama-3.1-8b-instruct"
 helm upgrade --install vss deploy/helm/nvidia-blueprint-vss-2.4.1.tgz \
   -n vss \
   -f deploy/helm/values-openshift.yaml \
-  --set openshift.secrets.ngcApiKey="$NGC_API_KEY" \
-  --set openshift.secrets.hfToken="$HF_TOKEN"
+  --set nvcf.dockerRegSecrets[0].password="$NGC_API_KEY" \
+  --set nvcf.additionalSecrets[0].stringData.value="$NGC_API_KEY" \
+  --set nvcf.additionalSecrets[1].stringData.value="$HF_TOKEN"
 ```
 
 > **If guardrails are enabled** (`DISABLE_GUARDRAILS: "false"` in `values-openshift.yaml`), add the following `--set` flags to override the guardrails model (chart defaults to 70B):
@@ -454,7 +452,7 @@ The chart references multiple secrets that must exist prior to installation but 
 - **graph-db-creds-secret** - Neo4j credentials, mounted as files by the parent chart.
 - **hf-token-secret** - HuggingFace token for gated model downloads (see [Challenge 7](#7-hf_token-for-gated-model))
 
-**Solution:** The Helm chart template (`templates/openshift.yaml`) creates all required secrets when `openshift.enabled` and `openshift.secrets.create` are set to `true`. API keys are passed via `--set` at install time; service credentials use defaults from `values-openshift.yaml`.
+**Solution:** NGC and HuggingFace secrets are created via NVIDIA's built-in `nvcf` mechanism (`templates/nvcf_secrets.yaml`), configured in `values-openshift.yaml` and passed via `--set` at install time. Service credential secrets (ArangoDB, MinIO, Neo4j) are created by `templates/openshift.yaml` when `openshift.secrets.create` is `true`, or can be created manually before install.
 
 ---
 
@@ -497,7 +495,7 @@ nemo-rerank:
 
 The vss container downloads `nvidia/Cosmos-Reason2-8B` from HuggingFace at startup. This model is gated - users must accept NVIDIA's license and authenticate with an HF token. Without `HF_TOKEN`, the download fails silently and the server never opens port 8000, so the pod stays `Running` but the readiness probe never passes.
 
-**Solution:** The Helm chart creates `hf-token-secret` from the HF token passed via `--set openshift.secrets.hfToken`. The chart already references `hf-token-secret` as an optional `secretKeyRef` - the secret being absent is what caused the silent failure.
+**Solution:** The Helm chart creates `hf-token-secret` via NVIDIA's `nvcf.additionalSecrets` mechanism, configured in `values-openshift.yaml` and passed via `--set nvcf.additionalSecrets[1].stringData.value=$HF_TOKEN`. The chart already references `hf-token-secret` as an optional `secretKeyRef` — the secret being absent is what caused the silent failure.
 
 ---
 

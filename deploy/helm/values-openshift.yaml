@@ -1,7 +1,19 @@
 # OpenShift-specific value overrides for VSS deployment.
-# Usage: helm upgrade --install vss <chart> -f values-openshift.yaml \
-#          --set openshift.secrets.ngcApiKey=$NGC_API_KEY \
-#          --set openshift.secrets.hfToken=$HF_TOKEN
+# NGC and HF secrets — uses NVIDIA's built-in nvcf mechanism (templates/nvcf_secrets.yaml)
+nvcf:
+  dockerRegSecrets:
+    - name: ngc-docker-reg-secret
+      username: "$oauthtoken"
+      password: ""   # set via --set nvcf.dockerRegSecrets[0].password=$NGC_API_KEY
+  additionalSecrets:
+    - name: ngc-api-key-secret
+      stringData:
+        key: NGC_API_KEY
+        value: ""    # set via --set nvcf.additionalSecrets[0].stringData.value=$NGC_API_KEY
+    - name: hf-token-secret
+      stringData:
+        key: HF_TOKEN
+        value: ""    # set via --set nvcf.additionalSecrets[1].stringData.value=$HF_TOKEN
 
 openshift:
   enabled: true
@@ -25,11 +37,11 @@ openshift:
       insecureEdgeTerminationPolicy: Redirect
   scc:
     create: true
+  # Service credential secrets (arango, minio, neo4j)
+  # Defaults match upstream chart — override for production
+  # Set create: false to manage these secrets manually before install
   secrets:
     create: true
-    ngcApiKey: ""      # set via --set openshift.secrets.ngcApiKey=$NGC_API_KEY
-    hfToken: ""        # set via --set openshift.secrets.hfToken=$HF_TOKEN
-    # Default credentials — change for production
     arango:
       username: root
       password: password
