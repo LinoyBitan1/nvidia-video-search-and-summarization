@@ -115,10 +115,16 @@ Follow the steps from the [documentation](https://docs.nvidia.com/vss/3.1.0/clou
 Please refer to [Prerequisites section here for installation details](https://docs.nvidia.com/vss/3.1.0/prerequisites.html).
 
 
+## OpenShift Deployment
+
+Deploying VSS on OpenShift requires additional configuration to handle security context constraints, storage permissions, and GPU scheduling. Helm-based deployment with OpenShift-specific overrides is provided.
+
+- [deploy/helm/openshift-deployment.md](deploy/helm/openshift-deployment.md): Full deployment guide with step-by-step runbook and OpenShift-specific challenges and solutions.
+- [deploy/helm/values-openshift.yaml](deploy/helm/values-openshift.yaml): Helm value overrides for OpenShift compatibility.
+
 ## Contributing
 
 This project is currently in early access and not accepting contributions. Once made generally available, this project will accept contributions.
-
 
 ## License
 Refer to [LICENSE](LICENSE)
