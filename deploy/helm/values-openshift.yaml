@@ -1,5 +1,22 @@
-# OpenShift-specific value overrides for VSS deployment.
-# NGC and HF secrets — uses NVIDIA's built-in nvcf mechanism (templates/nvcf_secrets.yaml)
+# values-openshift.yaml — OpenShift overlay for the VSS Blueprint.
+#
+# Usage:
+#   helm install vss ./nvidia-blueprint-vss-2.4.1.tgz \
+#     -f values-openshift.yaml \
+#     --set nvcf.dockerRegSecrets[0].password=$NGC_API_KEY \
+#     --set nvcf.additionalSecrets[0].stringData.value=$NGC_API_KEY \
+#     --set nvcf.additionalSecrets[1].stringData.value=$HF_TOKEN \
+#     -n vss
+#
+# This file enables OpenShift-specific resources (Route, SCC, ServiceAccount,
+# credential Secrets) and switches from subchart Deployments to NIM Operator
+# managed services.  Cluster-specific values (tolerations, storageClass, NGC
+# keys) should be passed via --set at install time.
+
+# ---------------------------------------------------------------------------
+# NGC and HF secrets — uses NVIDIA's built-in nvcf mechanism
+# (templates/nvcf_secrets.yaml)
+# ---------------------------------------------------------------------------
 nvcf:
   dockerRegSecrets:
     - name: ngc-docker-reg-secret
@@ -15,148 +32,216 @@ nvcf:
         key: HF_TOKEN
         value: ""    # set via --set nvcf.additionalSecrets[1].stringData.value=$HF_TOKEN
 
+# ---------------------------------------------------------------------------
+# OpenShift features
+# ---------------------------------------------------------------------------
 openshift:
   enabled: true
-  # GPU tolerations — update keys to match your cluster's GPU node taints
-  # Find your keys: oc get nodes -l nvidia.com/gpu.present=true -o name | xargs -I{} oc describe {} | grep -A1 Taints
-  gpuTolerations: &gpu-tolerations
-    - key: nvidia.com/gpu
-      effect: NoSchedule
-      operator: Exists
-    # - key: <your-taint-key>
-    #   effect: NoSchedule
-    #   operator: Exists
-  serviceAccount:
-    create: true
-    name: vss-sa
   route:
     enabled: true
     host: ""
     tls:
       termination: edge
       insecureEdgeTerminationPolicy: Redirect
+  # Creates a custom SCC (vss-nim) that allows runAsUser: 0 (needed by
+  # arango-db) and skips recursive SELinux relabeling on NIM model PVCs.
   scc:
     create: true
   # Service credential secrets (arango, minio, neo4j)
-  # Defaults match upstream chart — override for production
-  # Set create: false to manage these secrets manually before install
+  # Defaults inherited from base chart — override for production via --set
   secrets:
     create: true
-    arango:
-      username: root
-      password: password
-    minio:
-      accessKey: minioadmin
-      secretKey: minioadmin
-    graphDb:
-      username: neo4j
-      password: password
 
+# ---------------------------------------------------------------------------
+# Global environment overrides
+# ---------------------------------------------------------------------------
 global:
   ngcImagePullSecretName: ngc-docker-reg-secret
   # ucfGlobalEnv appends env vars to all pods
   ucfGlobalEnv:
   - name: LLM_MODEL
     value: meta/llama-3.1-8b-instruct        # chart default: meta/llama-3.1-70b-instruct
-  - name: DISABLE_GUARDRAILS
-    value: "true"                              # chart default: false, for 8B LLM to skip guardrails
 
-# anyuid SCC — these services require their hardcoded UIDs (Challenge 2)
-arango-db:
-  serviceAccount:
-    create: false
-    name: vss-sa
-
-neo4j:
-  serviceAccount:
-    create: false
-    name: vss-sa
-
+# ---------------------------------------------------------------------------
+# VSS application overrides
+# ---------------------------------------------------------------------------
 vss:
-  serviceAccount:
-    create: false
-    name: vss-sa
-  tolerations: *gpu-tolerations
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+    # Add cluster-specific tolerations as needed:
+    # - key: <your-gpu-taint-key>
+    #   operator: Equal
+    #   value: "true"
+    #   effect: NoSchedule
   # GPU count — 1 for Llama 8B
   resources:
     limits:
       nvidia.com/gpu: 1
 
-
-# LLM model configuration
+# ---------------------------------------------------------------------------
+# Disable subchart Deployments — NIM Operator manages the NIM lifecycle.
+# ---------------------------------------------------------------------------
 nim-llm:
-  # GPU count — 1 for Llama 8B, 4 for Llama 70B
-  resources:
-    limits:
-      nvidia.com/gpu: 1
-  tolerations: *gpu-tolerations
-  model:
-    name: meta/llama-3.1-8b-instruct
-  image:
-    repository: nvcr.io/nim/meta/llama-3.1-8b-instruct
-    tag: latest
-  # Security context removal — NIM/NeMo containers work under any UID (Challenge 3)
-  podSecurityContext:
-    runAsUser: null
-    runAsGroup: null
-    fsGroup: null
+  enabled: false
 
 nemo-embedding:
-  tolerations: *gpu-tolerations
-  applicationSpecs:
-    embedding-deployment:
-      securityContext:
-        runAsUser: null
-        runAsGroup: null
-        fsGroup: null
-      containers:
-        embedding-container:
-          env:
-          - name: TOKENIZERS_PARALLELISM  # Prevents Rayon thread pool burst (Challenge 8)
-            value: "false"
-  extraPodVolumes:
-  - name: dshm  # Triton needs >64MB /dev/shm (Challenge 6)
-    emptyDir:
-      medium: Memory
-      sizeLimit: 2Gi
-  extraPodVolumeMounts:
-  - name: dshm
-    mountPath: /dev/shm
+  enabled: false
 
 nemo-rerank:
-  tolerations: *gpu-tolerations
-  applicationSpecs:
-    ranking-deployment:
-      securityContext:
-        runAsUser: null
-        runAsGroup: null
-      containers:
-        ranking-container:
-          env:
-          - name: TOKENIZERS_PARALLELISM
-            value: "false"
-  extraPodVolumes:
-  - name: dshm
-    emptyDir:
-      medium: Memory
-      sizeLimit: 2Gi
-  extraPodVolumeMounts:
-  - name: dshm
-    mountPath: /dev/shm
+  enabled: false
 
-# Writable storage — OpenShift random UID can't own image dirs (Challenge 1)
-milvus-minio:
-  extraPodVolumes:
-  - name: data-volume
-    emptyDir: {}
-  extraPodVolumeMounts:
-  - name: data-volume
-    mountPath: /minio_data
+# ---------------------------------------------------------------------------
+# NIM Operator integration — each NIM gets a NIMCache + NIMService pair.
+# The NIM Operator handles model downloading, caching, and GPU scheduling.
+# Requires: NIM Operator installed, NGC image-pull and API secrets in namespace.
+# ---------------------------------------------------------------------------
+nimOperator:
+  nim-llm:
+    enabled: true
+    replicas: 1
+    service:
+      name: "llm-nim-svc"
+    image:
+      repository: nvcr.io/nim/meta/llama-3.1-8b-instruct
+      tag: "latest"
+      pullPolicy: Always
+    resources:
+      limits:
+        nvidia.com/gpu: 1
+      requests:
+        nvidia.com/gpu: 1
+    storage:
+      pvc:
+        create: true
+        size: "100Gi"
+        volumeAccessMode: ReadWriteOnce
+        storageClass: ""
+    nodeSelector: {}
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      # Add cluster-specific tolerations as needed:
+      # - key: <your-gpu-taint-key>
+      #   operator: Equal
+      #   value: "true"
+      #   effect: NoSchedule
+    env:
+      - name: NIM_HTTP_API_PORT
+        value: "8000"
+      - name: TOKENIZERS_PARALLELISM
+        value: "false"
+    expose:
+      service:
+        name: http
+        type: ClusterIP
+        port: 8000
+    startupProbe:
+      enabled: true
+      probe:
+        httpGet:
+          path: /v1/health/ready
+          port: 8000
+        initialDelaySeconds: 120
+        periodSeconds: 30
+        failureThreshold: 240
 
-milvus:
-  extraPodVolumes:
-  - name: data-volume
-    emptyDir: {}
-  extraPodVolumeMounts:
-  - name: data-volume
-    mountPath: /var/lib/milvus
+  nemo-embedding:
+    enabled: true
+    replicas: 1
+    service:
+      name: "nemo-embedding-embedding-deployment-embedding-service"
+    image:
+      repository: nvcr.io/nim/nvidia/llama-3.2-nv-embedqa-1b-v2
+      tag: "1.9.0"
+      pullPolicy: Always
+    resources:
+      limits:
+        nvidia.com/gpu: 1
+      requests:
+        nvidia.com/gpu: 1
+    storage:
+      pvc:
+        create: true
+        size: "50Gi"
+        volumeAccessMode: ReadWriteOnce
+        storageClass: ""
+    nodeSelector: {}
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      # Add cluster-specific tolerations as needed:
+      # - key: <your-gpu-taint-key>
+      #   operator: Equal
+      #   value: "true"
+      #   effect: NoSchedule
+    env:
+      - name: TOKENIZERS_PARALLELISM
+        value: "false"
+    expose:
+      service:
+        name: http
+        type: ClusterIP
+        port: 8000
+    startupProbe:
+      enabled: true
+      probe:
+        httpGet:
+          path: /v1/health/ready
+          port: 8000
+        initialDelaySeconds: 60
+        periodSeconds: 30
+        failureThreshold: 120
+
+  nemo-rerank:
+    enabled: true
+    replicas: 1
+    service:
+      name: "nemo-rerank-ranking-deployment-ranking-service"
+    image:
+      repository: nvcr.io/nim/nvidia/llama-3.2-nv-rerankqa-1b-v2
+      tag: "1.7.0"
+      pullPolicy: Always
+    resources:
+      limits:
+        nvidia.com/gpu: 1
+      requests:
+        nvidia.com/gpu: 1
+    storage:
+      pvc:
+        create: true
+        size: "50Gi"
+        volumeAccessMode: ReadWriteOnce
+        storageClass: ""
+    nodeSelector: {}
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      # Add cluster-specific tolerations as needed:
+      # - key: <your-gpu-taint-key>
+      #   operator: Equal
+      #   value: "true"
+      #   effect: NoSchedule
+    env:
+      - name: TOKENIZERS_PARALLELISM
+        value: "false"
+    expose:
+      service:
+        name: http
+        type: ClusterIP
+        port: 8000
+    startupProbe:
+      enabled: true
+      probe:
+        httpGet:
+          path: /v1/health/ready
+          port: 8000
+        initialDelaySeconds: 60
+        periodSeconds: 30
+        failureThreshold: 120
+
+
